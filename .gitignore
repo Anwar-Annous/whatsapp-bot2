@@ -1,0 +1,9 @@
+node_modules/
+uploads/
+backend/session/
+.env
+.DS_Store
+.wwebjs_cache
+.wwebjs_auth
+node_modules
+uploads

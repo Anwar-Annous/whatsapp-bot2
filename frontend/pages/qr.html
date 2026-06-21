@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>QR واتساب</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&family=Tajawal:wght@400;600;700&display=swap" rel="stylesheet" />
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.rtl.min.css" rel="stylesheet" />
+    <link href="../css/style.css" rel="stylesheet" />
+  </head>
+  <body>
+    <div class="min-vh-100 d-flex align-items-center justify-content-center">
+      <div class="card shadow-lg" style="max-width: 460px; width: 100%; border-radius: 32px;">
+        <div class="card-body p-4">
+          <div class="brand-header mb-3">
+            <span class="brand-dot"></span>
+            <div>
+              <h4 class="brand-title">QR واتساب</h4>
+              <p class="brand-subtitle">امسح الكود عبر واتساب لربط الجلسة بسرعة.</p>
+            </div>
+          </div>
+          <div id="statusText" class="mb-4 text-muted">جارٍ تحميل بيانات الجلسة...</div>
+          <div id="qrContainer"></div>
+          <button id="refreshBtn" class="btn btn-primary mt-4 w-100">تحديث QR</button>
+        </div>
+      </div>
+    </div>
+    <script>
+      async function loadQr() {
+        const res = await fetch('/api/qr');
+        const data = await res.json();
+        document.getElementById('statusText').textContent = data.success ? `الحالة: ${data.state}` : 'لا توجد بيانات';
+        document.getElementById('qrContainer').innerHTML = data.qr ? `<img src="${data.qr}" class="img-fluid" alt="QR" />` : '<p class="text-muted">انتظر ظهور QR</p>';
+      }
+      document.getElementById('refreshBtn').addEventListener('click', loadQr);
+      loadQr();
+    </script>
+  </body>
+</html>
