@@ -99,7 +99,9 @@ async function getAutomation(req, res) {
 
 async function saveAutomation(req, res) {
   const { enabled, cooldown_hours, steps, trigger_mode } = req.body;
+  console.log('[DEBUG] apiController.saveAutomation - received', { workspaceId: req.workspaceId, enabled, cooldown_hours, trigger_mode, stepsLength: Array.isArray(steps) ? steps.length : 0 });
   await automationService.saveAutomation({ enabled, cooldown_hours, steps, trigger_mode }, req.workspaceId);
+  console.log('[DEBUG] apiController.saveAutomation - saved for workspace', req.workspaceId);
   res.json({ success: true, message: 'تم حفظ إعدادات الأتمتة' });
 }
 

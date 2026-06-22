@@ -168,7 +168,11 @@
   async function saveAutomation() {
     const steps = automationSteps.map(s => { if (s.type === 'text') return { type: 'text', text: s.text || '' }; if (s.type === 'image' || s.type === 'video') return { type: s.type, media_id: s.media_id || '', caption: s.caption || '' }; if (s.type === 'audio') return { type: 'audio', media_id: s.media_id || '' }; if (s.type === 'delay') return { type: 'delay', seconds: Number(s.seconds) || 60 }; return s; });
     const data = { enabled: document.getElementById('automationEnabled')?.checked ?? true, cooldown_hours: document.getElementById('cooldownHours')?.value || 24, steps, trigger_mode: document.querySelector('input[name="automationTriggerMode"]:checked')?.value || 'first_message' };
-    try { await apiPost('/api/automation', data); alert('تم حفظ الأتمتة'); } catch (e) { console.error('saveAutomation:', e); }
+    try {
+      const res = await apiPost('/api/automation', data);
+      console.log('[DEBUG] frontend.saveAutomation - response:', res, 'workspaceId:', getWorkspaceId());
+      alert('تم حفظ الأتمتة');
+    } catch (e) { console.error('saveAutomation:', e); }
   }
   function addAutomationStep(type) { if (type === 'text') automationSteps.push({ type: 'text', text: '' }); else if (type === 'image') automationSteps.push({ type: 'image', media_id: '', caption: '' }); else if (type === 'video') automationSteps.push({ type: 'video', media_id: '', caption: '' }); else if (type === 'audio') automationSteps.push({ type: 'audio', media_id: '' }); else if (type === 'delay') automationSteps.push({ type: 'delay', seconds: 60 }); renderAutomationSteps(); }
 
