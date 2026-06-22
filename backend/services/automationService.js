@@ -136,8 +136,11 @@ async function processScheduledMessages(sendText, sendMediaById) {
 async function runAutomation(sendText, sendMediaById, chat, conversationId, context = {}) {
   const workspaceId = context.workspaceId || 1;
   const automation = await getAutomation(workspaceId);
+  console.log('[TRACE] runAutomation called', { chat, conversationId, workspaceId });
+  console.log('[TRACE] automation loaded', { automationId: automation && automation.id, enabled: automation && automation.enabled });
   if (!automation || !automation.enabled) return false;
   const decision = getRunDecision(automation, context);
+  console.log('[TRACE] getRunDecision result', decision);
   if (!decision.allowed) {
     await logService.create('info', 'automation_skipped', `${decision.reason} for ${chat}`, workspaceId);
     return false;
@@ -149,6 +152,7 @@ async function runAutomation(sendText, sendMediaById, chat, conversationId, cont
     const step = automation.steps[index];
     if (!step || !step.type) continue;
 
+    console.log('[TRACE] executing automation step', { index, step });
     const delaySeconds = getStepDelaySeconds(step);
     if (step.type === 'delay' && delaySeconds > 0) {
       const pendingSteps = automation.steps.slice(index + 1);

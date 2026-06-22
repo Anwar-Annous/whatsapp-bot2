@@ -11,24 +11,30 @@ function getMediaType(mimetype) {
 }
 
 async function uploadMedia(req, res) {
-  if (!req.file) return res.status(400).json({ success: false, message: 'الملف مطلوب' });
-  const type = getMediaType(req.file.mimetype);
-  const mediaPath = path.relative(path.join(__dirname, '..', '..'), req.file.path).replace(/\\/g, '/');
-  const result = await db.query('INSERT INTO media (type, filename, original_name, path) VALUES (?, ?, ?, ?)', [
-    type,
-    req.file.filename,
-    req.file.originalname,
-    mediaPath
-  ]);
-  await logService.create('info', 'media_upload', `uploaded ${req.file.originalname}`);
-  res.json({
-    success: true,
-    message: 'تم رفع الوسائط بنجاح',
-    id: result.insertId,
-    path: mediaPath,
-    type,
-    filename: req.file.originalname
-  });
+  try {
+    if (!req.file) return res.status(400).json({ success: false, message: 'الملف مطلوب' });
+    const type = getMediaType(req.file.mimetype);
+    const mediaPath = path.relative(path.join(__dirname, '..', '..'), req.file.path).replace(/\\/g, '/');
+    const result = await db.query('INSERT INTO media (type, filename, original_name, path) VALUES (?, ?, ?, ?)', [
+      type,
+      req.file.filename,
+      req.file.originalname,
+      mediaPath
+    ]);
+    await logService.create('info', 'media_upload', `uploaded ${req.file.originalname}`);
+    res.json({
+      success: true,
+      message: 'تم رفع الوسائط بنجاح',
+      id: result.insertId,
+      path: mediaPath,
+      type,
+      filename: req.file.originalname
+    });
+  } catch (err) {
+    await logService.create('error', 'media_upload_failed', err.message);
+    console.error('[ERROR] uploadMedia failed', err.message);
+    return res.status(500).json({ success: false, message: 'فشل في رفع الوسائط', error: err.message });
+  }
 }
 
 async function deleteMedia(req, res) {

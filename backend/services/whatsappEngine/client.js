@@ -156,25 +156,43 @@ class ClientWrapper {
 
   async sendText(chatId, text) {
     if (!this.client) throw new Error('Client not initialized');
+    this.logger.info('sendText.called', { chatId, workspaceId: this.workspaceId });
     await this.enqueueOutgoing(async () => {
-      await this.sendClientMessage(chatId, text, undefined, `text to ${chatId}`);
+      try {
+        await this.sendClientMessage(chatId, text, undefined, `text to ${chatId}`);
+        this.logger.info('sendText.sent', { chatId, workspaceId: this.workspaceId });
+      } catch (err) {
+        this.logger.error('sendText.error', { chatId, error: err.message, workspaceId: this.workspaceId });
+        throw err;
+      }
       await new Promise(r => setTimeout(r, 650));
     });
   }
 
   async sendMediaById(chatId, mediaId, type, caption = '') {
     if (!this.client) throw new Error('Client not initialized');
+    this.logger.info('sendMediaById.called', { chatId, mediaId, requestedType: type, workspaceId: this.workspaceId });
     const rows = await db.query('SELECT * FROM media WHERE id = ? AND workspace_id = ?', [mediaId, this.workspaceId]);
     if (!rows.length) throw new Error('Media not found');
     const media = rows[0];
     const filePath = path.join(process.cwd(), media.path);
-    if (!fs.existsSync(filePath)) throw new Error(`Media file not found: ${media.path}`);
+    this.logger.info('sendMediaById.mediaRow', { id: media.id, typeInDb: media.type, path: media.path, workspaceId: this.workspaceId });
+    if (!fs.existsSync(filePath)) {
+      this.logger.error('sendMediaById.missingFile', { filePath, workspaceId: this.workspaceId });
+      throw new Error(`Media file not found: ${media.path}`);
+    }
     const messageMedia = MessageMedia.fromFilePath(filePath);
     const mediaType = type || media.type;
     const options = getMediaSendOptions(mediaType, filePath, messageMedia, caption);
     const timeoutMs = (mediaType === 'audio' || mediaType === 'video') ? AUDIO_SEND_TIMEOUT_MS : SEND_TIMEOUT_MS;
     await this.enqueueOutgoing(async () => {
-      await this.sendClientMessage(chatId, messageMedia, options, `${mediaType} to ${chatId}`, timeoutMs);
+      try {
+        await this.sendClientMessage(chatId, messageMedia, options, `${mediaType} to ${chatId}`, timeoutMs);
+        this.logger.info('sendMediaById.sent', { chatId, mediaId, mediaType, workspaceId: this.workspaceId });
+      } catch (err) {
+        this.logger.error('sendMediaById.error', { chatId, mediaId, error: err.message, workspaceId: this.workspaceId });
+        throw err;
+      }
       await new Promise(r => setTimeout(r, (mediaType === 'audio' || mediaType === 'video') ? 1400 : 900));
     });
   }
@@ -233,6 +251,7 @@ class ClientWrapper {
   async handleIncomingMessage(message) {
     if (message.fromMe) return;
     try {
+      this.logger.info('incoming_message.received', { from: message.from, type: message.type, workspaceId: this.workspaceId });
       const contact = await message.getContact();
       const phone = contact.number || message.from.replace('@c.us', '');
       const name = contact.pushname || contact.name || phone;
@@ -284,6 +303,7 @@ class ClientWrapper {
       this.emit('new_message', { chatId, body, type, conversationId: conversation.id });
       await logService.create('info', 'incoming_message', `from ${phone}`, this.workspaceId);
 
+      this.logger.info('automation.invoking', { chatId, conversationId: conversation.id, workspaceId: this.workspaceId });
       const autoSent = await automationService.runAutomation(
         (cid, text) => this.sendText(cid, text),
         (cid, mid, t, cap) => this.sendMediaById(cid, mid, t, cap),

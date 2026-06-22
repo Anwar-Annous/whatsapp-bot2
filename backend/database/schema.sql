@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS scheduled_messages (
 
 CREATE TABLE IF NOT EXISTS media (
   id INT AUTO_INCREMENT PRIMARY KEY,
-  type ENUM('image','audio') NOT NULL,
+  type ENUM('image','audio','video','file') NOT NULL,
   filename VARCHAR(255) NOT NULL,
   original_name VARCHAR(255) NOT NULL,
   path VARCHAR(255) NOT NULL,
