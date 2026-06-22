@@ -93,6 +93,7 @@ async function updateContact(req, res) {
 
 async function getAutomation(req, res) {
   const automation = await automationService.getAutomation(req.workspaceId);
+  console.log('[DEBUG] apiController.getAutomation - workspaceId:', req.workspaceId, 'automation:', automation);
   res.json({ success: true, automation });
 }
 

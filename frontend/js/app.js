@@ -139,13 +139,14 @@
   // ================= AUTOMATION =================
   let automationSteps = [];
   async function loadAutomation() {
-    try { const res = await apiGet('/api/automation'); if (!res.success) return; const a = res.automation; document.getElementById('automationEnabled').checked = a?.enabled ?? true; document.getElementById('cooldownHours').value = a?.cooldown_hours || 24;
+    try { const res = await apiGet('/api/automation'); console.log('[DEBUG] frontend.loadAutomation - api response:', res); if (!res.success) return; const a = res.automation; document.getElementById('automationEnabled').checked = a?.enabled ?? true; document.getElementById('cooldownHours').value = a?.cooldown_hours || 24;
       document.querySelectorAll('input[name="automationTriggerMode"]').forEach(r => r.checked = r.value === (a?.trigger_mode || 'first_message'));
       automationSteps = a?.steps || []; renderAutomationSteps();
     } catch (e) { console.error('loadAutomation:', e); }
   }
   function renderAutomationSteps() {
-    const container = document.getElementById('automationSteps'); if (!container) return; container.innerHTML = '';
+    const container = document.getElementById('automationSteps'); console.log('[DEBUG] frontend.renderAutomationSteps - containerExists:', !!container, 'automationSteps.length:', automationSteps.length);
+    if (!container) return; container.innerHTML = '';
     automationSteps.forEach((step, index) => {
       const card = document.createElement('div'); card.className = 'card automation-step-card border-0 p-3 mb-3';
       const label = step.type === 'text' ? 'نص' : step.type === 'image' ? 'صورة' : step.type === 'video' ? 'فيديو' : step.type === 'audio' ? 'صوت' : 'مؤقت';

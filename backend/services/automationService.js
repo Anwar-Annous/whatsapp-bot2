@@ -9,10 +9,12 @@ function normalizeTriggerMode(mode) {
 
 async function getAutomation(workspaceId) {
   const rows = await db.query('SELECT * FROM automations WHERE workspace_id = ? ORDER BY id DESC LIMIT 1', [workspaceId]);
+  console.log('[DEBUG] automationService.getAutomation - sql rows:', rows, 'workspaceId:', workspaceId);
   if (!rows.length) return null;
   const automation = rows[0];
   automation.steps = JSON.parse(automation.steps_json || '[]');
   automation.trigger_mode = normalizeTriggerMode(automation.trigger_mode);
+  console.log('[DEBUG] automationService.getAutomation - parsed automation:', automation);
   return automation;
 }
 
