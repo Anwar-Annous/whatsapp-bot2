@@ -145,8 +145,10 @@
     } catch (e) { console.error('loadAutomation:', e); }
   }
   function renderAutomationSteps() {
-    const container = document.getElementById('automationSteps'); console.log('[DEBUG] frontend.renderAutomationSteps - containerExists:', !!container, 'automationSteps.length:', automationSteps.length);
-    if (!container) return; container.innerHTML = '';
+    const container = document.getElementById('automationSteps');
+    console.log('[DEBUG] frontend.renderAutomationSteps - containerExists:', !!container, 'automationSteps.length:', automationSteps.length);
+    if (!container) return;
+    container.innerHTML = '';
     automationSteps.forEach((step, index) => {
       const card = document.createElement('div'); card.className = 'card automation-step-card border-0 p-3 mb-3';
       const label = step.type === 'text' ? 'نص' : step.type === 'image' ? 'صورة' : step.type === 'video' ? 'فيديو' : step.type === 'audio' ? 'صوت' : 'مؤقت';
@@ -162,7 +164,35 @@
       card.innerHTML = `<div class="d-flex justify-content-between align-items-center mb-2"><strong>${label}</strong><button class="btn btn-sm btn-outline-light remove-step" data-index="${index}">✕</button></div>${inner}`;
       container.appendChild(card);
     });
+
+    // wire up interactions so user edits are persisted to the model
     container.querySelectorAll('.remove-step').forEach(btn => btn.addEventListener('click', () => { automationSteps.splice(Number(btn.dataset.index), 1); renderAutomationSteps(); }));
+
+    // text inputs
+    container.querySelectorAll('.step-text').forEach(inp => {
+      inp.addEventListener('input', (e) => {
+        const idx = Number(e.target.dataset.index);
+        automationSteps[idx].text = e.target.value;
+      });
+    });
+
+    // caption inputs
+    container.querySelectorAll('.step-caption').forEach(inp => {
+      inp.addEventListener('input', (e) => {
+        const idx = Number(e.target.dataset.index);
+        automationSteps[idx].caption = e.target.value;
+      });
+    });
+
+    // delay inputs
+    container.querySelectorAll('.step-delay').forEach(inp => {
+      inp.addEventListener('input', (e) => {
+        const idx = Number(e.target.dataset.index);
+        automationSteps[idx].seconds = Number(e.target.value) || 0;
+      });
+    });
+
+    // file uploads
     container.querySelectorAll('.step-upload').forEach(inp => inp.addEventListener('change', async (e) => { const idx = Number(e.target.dataset.index); const file = e.target.files[0]; if (!file) return; const fd = new FormData(); fd.append('media', file); const res = await fetch('/api/media/upload', { method: 'POST', body: fd, credentials: 'same-origin' }); const data = await res.json(); if (data.success) { automationSteps[idx].media_id = data.id; automationSteps[idx].filename = data.filename; renderAutomationSteps(); } }));
   }
   async function saveAutomation() {
