@@ -67,9 +67,11 @@ const automationService = require('./services/automationService');
 const logService = require('./services/logService');
 
 const SCHEDULED_WORKER_INTERVAL_MS = 1000;
+let scheduledWorker = null;
 
 function startScheduledMessageWorker() {
-  setInterval(async () => {
+  if (scheduledWorker) return;
+  scheduledWorker = setInterval(async () => {
     try {
       const rows = await db.query("SELECT * FROM scheduled_messages WHERE status = 'pending' AND scheduled_at <= NOW() ORDER BY scheduled_at ASC, id ASC");
       for (const row of rows) {
@@ -119,6 +121,10 @@ async function start() {
 async function shutdown(signal) {
   logger.info(`Received ${signal}, shutting down gracefully...`);
   try {
+    if (scheduledWorker) {
+      clearInterval(scheduledWorker);
+      scheduledWorker = null;
+    }
     await engine.destroyAll();
     server.close(() => {
       logger.info('HTTP server closed');

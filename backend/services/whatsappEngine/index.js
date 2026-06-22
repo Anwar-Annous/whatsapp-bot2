@@ -6,29 +6,64 @@ class WhatsAppEngine {
   constructor(io) {
     this.io = io;
     this.clients = new Map(); // workspaceId -> ClientWrapper
+    this.createPromises = new Map();
     this.logger = logger.child({ component: 'WhatsAppEngine' });
   }
 
   async loadAllWorkspaces() {
     const workspaces = await workspaceModel.findAll();
     for (const ws of workspaces) {
-      await this.createClient(ws.id);
+      try {
+        await this.createClient(ws.id);
+      } catch (err) {
+        this.logger.error('Failed to initialize workspace on startup', { workspaceId: ws.id, error: err.message });
+      }
     }
     this.logger.info(`Loaded ${workspaces.length} workspace(s)`);
   }
 
   async createClient(workspaceId) {
     if (this.clients.has(workspaceId)) {
-      this.logger.warn(`Workspace ${workspaceId} already has a client`);
+      this.logger.debug(`Workspace ${workspaceId} client already exists`);
       return this.clients.get(workspaceId);
     }
-    // Migrate legacy session (old flat session/ to per-workspace session/)
-    await this.migrateLegacySessionIfNeeded(workspaceId);
-    const wrapper = new ClientWrapper(workspaceId, this.io);
-    this.clients.set(workspaceId, wrapper);
-    await wrapper.initialize();
-    await workspaceModel.updateStatus(workspaceId, 'connecting');
-    return wrapper;
+
+    if (this.createPromises.has(workspaceId)) {
+      this.logger.debug(`Workspace ${workspaceId} create already in progress`);
+      return this.createPromises.get(workspaceId);
+    }
+
+    const promise = (async () => {
+      await this.migrateLegacySessionIfNeeded(workspaceId);
+
+      if (this.clients.has(workspaceId)) {
+        return this.clients.get(workspaceId);
+      }
+
+      const wrapper = new ClientWrapper(workspaceId, this.io);
+      this.clients.set(workspaceId, wrapper);
+      try {
+        await wrapper.initialize();
+        await workspaceModel.updateStatus(workspaceId, 'connecting');
+        return wrapper;
+      } catch (err) {
+        this.logger.error('Workspace client initialization failed', { workspaceId, error: err.message });
+        try {
+          await wrapper.destroy();
+        } catch (destroyErr) {
+          this.logger.warn('Failed to destroy failed workspace client', { workspaceId, error: destroyErr.message });
+        }
+        this.clients.delete(workspaceId);
+        throw err;
+      }
+    })();
+
+    this.createPromises.set(workspaceId, promise);
+    try {
+      return await promise;
+    } finally {
+      this.createPromises.delete(workspaceId);
+    }
   }
 
   async migrateLegacySessionIfNeeded(workspaceId) {
@@ -59,9 +94,17 @@ class WhatsAppEngine {
   }
 
   async destroyClient(workspaceId) {
+    if (this.createPromises.has(workspaceId)) {
+      await this.createPromises.get(workspaceId).catch(() => {});
+    }
+
     const wrapper = this.clients.get(workspaceId);
     if (wrapper) {
-      await wrapper.destroy();
+      try {
+        await wrapper.destroy();
+      } catch (err) {
+        this.logger.warn('Workspace client destroy failed', { workspaceId, error: err.message });
+      }
       this.clients.delete(workspaceId);
     }
     await workspaceModel.updateStatus(workspaceId, 'disconnected');

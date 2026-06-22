@@ -67,11 +67,20 @@ class ClientWrapper {
     this.authClientId = `whatsapp-crm-ws-${workspaceId}`;
     this.reconnectTimer = null;
     this.initializeAttempts = 0;
+    this.initializationPromise = null;
+    this.destroyPromise = null;
+    this.shutdownRequested = false;
+    this.logoutDetected = false;
+    this.eventHandlers = {};
     this.logger = logger.child({ workspaceId, component: 'whatsappClient' });
   }
 
   getStatus() {
     return { ...this.status, workspaceId: this.workspaceId };
+  }
+
+  updateStatus(state, qr = null, connected = false) {
+    this.status = { state, qr, connected };
   }
 
   async ensureSessionDir() {
@@ -170,6 +179,57 @@ class ClientWrapper {
     });
   }
 
+  detachEvents() {
+    if (!this.client || !this.eventHandlers) return;
+    Object.entries(this.eventHandlers).forEach(([event, handler]) => {
+      try {
+        this.client.off(event, handler);
+      } catch (err) {
+        this.logger.debug('Failed to remove event handler', { event, error: err.message });
+      }
+    });
+    this.eventHandlers = {};
+  }
+
+  async safeDestroyClient() {
+    if (!this.client) return;
+    if (this.destroyPromise) return this.destroyPromise;
+
+    this.destroyPromise = (async () => {
+      try {
+        this.detachEvents();
+        await this.client.destroy();
+        this.logger.info('Client destroyed successfully');
+      } catch (err) {
+        this.logger.warn('Client destruction failed', { error: err.message });
+      } finally {
+        this.destroyPromise = null;
+      }
+    })();
+
+    return this.destroyPromise;
+  }
+
+  handleDisconnect(reason) {
+    const normalizedReason = String(reason || '').toLowerCase();
+    const isLogout = ['logout', 'session_revoked', 'remote_session_close', 'change_session'].some((token) => normalizedReason.includes(token));
+
+    if (isLogout) {
+      this.logoutDetected = true;
+      this.updateStatus('logout', null, false);
+      this.emit('logout', { reason });
+      this.emitUpdate();
+      this.logger.warn('Permanent logout detected', { reason });
+      return;
+    }
+
+    this.updateStatus('disconnected', null, false);
+    this.emit('disconnected', { reason });
+    this.emitUpdate();
+    this.logger.warn('Disconnected', { reason });
+    this.scheduleReconnect();
+  }
+
   async handleIncomingMessage(message) {
     if (message.fromMe) return;
     try {
@@ -240,44 +300,56 @@ class ClientWrapper {
   }
 
   attachEvents() {
-    this.client.on('qr', async (qr) => {
-      this.status = { state: 'qr', qr, connected: false };
-      const qrData = await qrcode.toDataURL(qr);
-      this.status.qr = qrData;
-      this.emit('qr', this.status);
-      this.logger.info('QR generated');
-    });
+    if (!this.client) return;
 
-    this.client.on('ready', () => {
-      this.status = { state: 'connected', qr: null, connected: true };
+    this.detachEvents();
+
+    this.eventHandlers.qr = async (qr) => {
+      this.updateStatus('qr', await qrcode.toDataURL(qr), false);
+      this.emit('qr', this.status);
+      this.emitUpdate();
+      this.logger.info('QR generated');
+    };
+
+    this.eventHandlers.ready = () => {
+      this.updateStatus('connected', null, true);
       this.emitUpdate();
       this.logger.info('Client ready');
-    });
+    };
 
-    this.client.on('authenticated', () => {
-      this.status = { state: 'connected', qr: null, connected: true };
+    this.eventHandlers.authenticated = () => {
+      this.updateStatus('connected', null, true);
       this.emitUpdate();
       this.logger.info('Client authenticated');
-    });
+    };
 
-    this.client.on('auth_failure', async (err) => {
-      this.status = { state: 'disconnected', qr: null, connected: false };
-      this.emit('auth_failure', { error: err.message });
-      this.logger.error('Auth failure', { error: err.message });
-      try { await this.client.logout(); } catch (e) {}
+    this.eventHandlers.auth_failure = async (err) => {
+      this.updateStatus('disconnected', null, false);
+      this.emit('auth_failure', { error: err?.message });
+      this.emitUpdate();
+      this.logger.error('Auth failure', { error: err?.message });
+      try {
+        await this.client.logout();
+      } catch (e) {
+        this.logger.debug('Logout after auth failure failed', { error: e.message });
+      }
       this.scheduleReconnect();
-    });
+    };
 
-    this.client.on('disconnected', async (reason) => {
-      this.status = { state: 'disconnected', qr: null, connected: false };
-      this.emit('disconnected', { reason });
-      this.logger.warn('Disconnected', { reason });
-      this.scheduleReconnect();
-    });
+    this.eventHandlers.disconnected = async (reason) => {
+      this.handleDisconnect(reason);
+    };
 
-    this.client.on('message', async (message) => {
+    this.eventHandlers.message = async (message) => {
       await this.handleIncomingMessage(message);
-    });
+    };
+
+    this.client.on('qr', this.eventHandlers.qr);
+    this.client.on('ready', this.eventHandlers.ready);
+    this.client.on('authenticated', this.eventHandlers.authenticated);
+    this.client.on('auth_failure', this.eventHandlers.auth_failure);
+    this.client.on('disconnected', this.eventHandlers.disconnected);
+    this.client.on('message', this.eventHandlers.message);
   }
 
   scheduleReconnect() {
@@ -294,37 +366,75 @@ class ClientWrapper {
   }
 
   async initialize() {
-    if (this.client) {
-      try { await this.client.destroy(); } catch (e) {}
-      this.client = null;
+    if (this.shutdownRequested) {
+      this.logger.info('Initialization skipped because shutdown requested');
+      return;
     }
-    this.client = await this.createClient();
-    this.attachEvents();
-    this.status = { state: 'connecting', qr: null, connected: false };
-    this.emitUpdate();
+
+    if (this.initializationPromise) {
+      return this.initializationPromise;
+    }
+
+    this.initializationPromise = (async () => {
+      try {
+        if (this.client) {
+          await this.safeDestroyClient();
+          this.client = null;
+        }
+
+        if (this.reconnectTimer) {
+          clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = null;
+        }
+
+        this.logoutDetected = false;
+        this.client = await this.createClient();
+        this.attachEvents();
+        this.updateStatus('connecting', null, false);
+        this.emitUpdate();
+
+        await this.client.initialize();
+        this.initializeAttempts = 0;
+      } catch (err) {
+        this.initializeAttempts += 1;
+        this.logger.error('Initialize failed', { error: err.message, attempt: this.initializeAttempts });
+        try {
+          await this.safeDestroyClient();
+        } catch (destroyErr) {
+          this.logger.warn('Error destroying failed client after init failure', { error: destroyErr.message });
+        }
+        this.client = null;
+        if (!this.shutdownRequested && !this.logoutDetected) {
+          this.scheduleReconnect();
+        }
+      }
+    })();
+
     try {
-      await this.client.initialize();
-      this.initializeAttempts = 0;
-    } catch (err) {
-      this.initializeAttempts += 1;
-      this.logger.error('Initialize failed', { error: err.message, attempt: this.initializeAttempts });
-      try { await this.client.destroy(); } catch (destroyErr) {}
-      this.client = null;
-      this.scheduleReconnect();
+      return await this.initializationPromise;
+    } finally {
+      this.initializationPromise = null;
     }
   }
 
   async destroy() {
+    this.shutdownRequested = true;
+
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    if (this.client) {
-      try { await this.client.destroy(); } catch (e) {}
-      this.client = null;
+
+    if (this.initializationPromise) {
+      await this.initializationPromise.catch(() => {});
     }
-    this.status = { state: 'disconnected', qr: null, connected: false };
+
+    await this.safeDestroyClient();
+    this.client = null;
+    this.logoutDetected = false;
+    this.updateStatus('disconnected', null, false);
     this.emitUpdate();
+    this.shutdownRequested = false;
   }
 }
 
