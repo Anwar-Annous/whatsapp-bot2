@@ -151,7 +151,15 @@ class ClientWrapper {
   }
 
   async sendClientMessage(chatId, content, options, label, timeoutMs = SEND_TIMEOUT_MS) {
-    return withTimeout(this.client.sendMessage(chatId, content, options), timeoutMs, label);
+    this.logger.info('sendClientMessage.start', { label, chatId, workspaceId: this.workspaceId });
+    try {
+      const res = await withTimeout(this.client.sendMessage(chatId, content, options), timeoutMs, label);
+      this.logger.info('sendClientMessage.success', { label, chatId, workspaceId: this.workspaceId });
+      return res;
+    } catch (err) {
+      this.logger.error('sendClientMessage.error', { label, chatId, error: err.message, workspaceId: this.workspaceId });
+      throw err;
+    }
   }
 
   async sendText(chatId, text) {
@@ -277,29 +285,45 @@ class ClientWrapper {
       }
 
       const existingContacts = await db.query('SELECT * FROM contacts WHERE phone = ? AND workspace_id = ?', [phone, this.workspaceId]);
+      this.logger.info('db.query', { sql: 'SELECT * FROM contacts WHERE phone = ? AND workspace_id = ?', params: [phone, this.workspaceId], workspaceId: this.workspaceId });
+      this.logger.info('db.result.contacts', { count: existingContacts.length, workspaceId: this.workspaceId });
       let contactId;
       if (existingContacts.length) {
         contactId = existingContacts[0].id;
-        await db.query('UPDATE contacts SET name = ?, last_interaction = NOW() WHERE id = ?', [name, contactId]);
+        this.logger.info('db.query', { sql: 'UPDATE contacts SET name = ?, last_interaction = NOW() WHERE id = ?', params: [name, contactId], workspaceId: this.workspaceId });
+        const updateRes = await db.query('UPDATE contacts SET name = ?, last_interaction = NOW() WHERE id = ?', [name, contactId]);
+        this.logger.info('db.result.updateContact', { updateRes, contactId, workspaceId: this.workspaceId });
       } else {
+        this.logger.info('db.query', { sql: 'INSERT INTO contacts (name, phone, workspace_id, last_interaction) VALUES (?, ?, ?, NOW())', params: [name, phone, this.workspaceId], workspaceId: this.workspaceId });
         const c = await db.query('INSERT INTO contacts (name, phone, workspace_id, last_interaction) VALUES (?, ?, ?, NOW())', [name, phone, this.workspaceId]);
+        this.logger.info('db.result.insertContact', { result: c, workspaceId: this.workspaceId });
         contactId = c.insertId;
       }
 
+      this.logger.info('db.query', { sql: 'SELECT * FROM conversations WHERE chat_id = ? AND workspace_id = ?', params: [chatId, this.workspaceId], workspaceId: this.workspaceId });
       const existingConv = await db.query('SELECT * FROM conversations WHERE chat_id = ? AND workspace_id = ?', [chatId, this.workspaceId]);
+      this.logger.info('db.result.conversations', { count: existingConv.length, workspaceId: this.workspaceId });
       let conversation;
       let isNew = false;
       if (existingConv.length) {
         conversation = existingConv[0];
-        await db.query('UPDATE conversations SET unread_count = unread_count + 1, status = ?, last_message = ?, last_at = NOW() WHERE id = ?', ['New', body, conversation.id]);
+        this.logger.info('db.query', { sql: 'UPDATE conversations SET unread_count = unread_count + 1, status = ?, last_message = ?, last_at = NOW() WHERE id = ?', params: ['New', body, conversation.id], workspaceId: this.workspaceId });
+        const u = await db.query('UPDATE conversations SET unread_count = unread_count + 1, status = ?, last_message = ?, last_at = NOW() WHERE id = ?', ['New', body, conversation.id]);
+        this.logger.info('db.result.updateConversation', { result: u, conversationId: conversation.id, workspaceId: this.workspaceId });
       } else {
+        this.logger.info('db.query', { sql: 'INSERT INTO conversations (chat_id, contact_id, workspace_id, status, unread_count, last_message, last_at) VALUES (?, ?, ?, ?, ?, ?, NOW())', params: [chatId, contactId, this.workspaceId, 'New', 1, body], workspaceId: this.workspaceId });
         const result = await db.query('INSERT INTO conversations (chat_id, contact_id, workspace_id, status, unread_count, last_message, last_at) VALUES (?, ?, ?, ?, ?, ?, NOW())', [chatId, contactId, this.workspaceId, 'New', 1, body]);
+        this.logger.info('db.result.insertConversation', { result, workspaceId: this.workspaceId });
+        this.logger.info('db.query', { sql: 'SELECT * FROM conversations WHERE id = ?', params: [result.insertId], workspaceId: this.workspaceId });
         const rows = await db.query('SELECT * FROM conversations WHERE id = ?', [result.insertId]);
+        this.logger.info('db.result.selectConversationById', { rows, workspaceId: this.workspaceId });
         conversation = rows[0];
         isNew = true;
       }
 
-      await db.query('INSERT INTO messages (conversation_id, sender, body, type, media_path, direction, workspace_id, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())', [conversation.id, 'client', body, type, mediaPath, 'in', this.workspaceId]);
+      this.logger.info('db.query', { sql: 'INSERT INTO messages (conversation_id, sender, body, type, media_path, direction, workspace_id, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())', params: [conversation.id, 'client', body, type, mediaPath, 'in', this.workspaceId], workspaceId: this.workspaceId });
+      const msgRes = await db.query('INSERT INTO messages (conversation_id, sender, body, type, media_path, direction, workspace_id, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())', [conversation.id, 'client', body, type, mediaPath, 'in', this.workspaceId]);
+      this.logger.info('db.result.insertMessage', { result: msgRes, conversationId: conversation.id, workspaceId: this.workspaceId });
       this.emit('new_message', { chatId, body, type, conversationId: conversation.id });
       await logService.create('info', 'incoming_message', `from ${phone}`, this.workspaceId);
 
@@ -323,6 +347,8 @@ class ClientWrapper {
     if (!this.client) return;
 
     this.detachEvents();
+
+    this.logger.info('attachEvents.start', { workspaceId: this.workspaceId });
 
     this.eventHandlers.qr = async (qr) => {
       this.updateStatus('qr', await qrcode.toDataURL(qr), false);
@@ -361,6 +387,7 @@ class ClientWrapper {
     };
 
     this.eventHandlers.message = async (message) => {
+      this.logger.info('event.message.received', { from: message.from, type: message.type, workspaceId: this.workspaceId });
       await this.handleIncomingMessage(message);
     };
 
@@ -370,6 +397,7 @@ class ClientWrapper {
     this.client.on('auth_failure', this.eventHandlers.auth_failure);
     this.client.on('disconnected', this.eventHandlers.disconnected);
     this.client.on('message', this.eventHandlers.message);
+    this.logger.info('attachEvents.complete', { workspaceId: this.workspaceId, events: Object.keys(this.eventHandlers) });
   }
 
   scheduleReconnect() {

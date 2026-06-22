@@ -35,6 +35,7 @@ async function saveAutomation(data, workspaceId) {
 }
 
 function getRunDecision(automation, context = {}) {
+  console.log('[TRACE] getRunDecision called', { automationId: automation && automation.id, enabled: automation && automation.enabled, context });
   if (!automation) return { allowed: false, reason: 'missing_automation' };
   if (!automation.enabled) return { allowed: false, reason: 'disabled' };
   const triggerMode = normalizeTriggerMode(automation.trigger_mode);
