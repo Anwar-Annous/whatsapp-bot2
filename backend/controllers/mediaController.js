@@ -1,52 +1,64 @@
 const fs = require('fs');
-const path = require('path');
 const db = require('../database/db');
 const logService = require('../services/logService');
-
-function getMediaType(mimetype) {
-  if (mimetype.startsWith('image/')) return 'image';
-  if (mimetype.startsWith('audio/')) return 'audio';
-  if (mimetype.startsWith('video/')) return 'video';
-  return 'file';
-}
+const mediaStorage = require('../utils/mediaStorage');
 
 async function uploadMedia(req, res) {
+  const workspaceId = req.workspaceId || 1;
   try {
-    if (!req.file) return res.status(400).json({ success: false, message: 'الملف مطلوب' });
-    const type = getMediaType(req.file.mimetype);
-    const mediaPath = path.relative(path.join(__dirname, '..', '..'), req.file.path).replace(/\\/g, '/');
-    const result = await db.query('INSERT INTO media (type, filename, original_name, path) VALUES (?, ?, ?, ?)', [
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'File is required' });
+    }
+
+    const type = mediaStorage.getMediaType(req.file.mimetype);
+    const mediaPath = mediaStorage.toStoredPath(req.file.path);
+
+    console.log('[DEBUG] uploadMedia.start', {
+      workspaceId,
       type,
-      req.file.filename,
-      req.file.originalname,
-      mediaPath
-    ]);
-    await logService.create('info', 'media_upload', `uploaded ${req.file.originalname}`);
-    res.json({
+      mimetype: req.file.mimetype,
+      originalName: req.file.originalname,
+      filename: req.file.filename,
+      absolutePath: req.file.path,
+      storedPath: mediaPath,
+      uploadRoot: mediaStorage.UPLOAD_ROOT
+    });
+
+    const result = await db.query(
+      'INSERT INTO media (type, filename, original_name, path, workspace_id) VALUES (?, ?, ?, ?, ?)',
+      [type, req.file.filename, req.file.originalname, mediaPath, workspaceId]
+    );
+
+    console.log('[DEBUG] uploadMedia.saved', { id: result.insertId, workspaceId, type, path: mediaPath });
+    await logService.create('info', 'media_upload', `uploaded ${type} ${req.file.originalname} as media ${result.insertId}`, workspaceId);
+
+    return res.json({
       success: true,
-      message: 'تم رفع الوسائط بنجاح',
+      message: 'Media uploaded successfully',
       id: result.insertId,
       path: mediaPath,
       type,
       filename: req.file.originalname
     });
   } catch (err) {
-    await logService.create('error', 'media_upload_failed', err.message);
-    console.error('[ERROR] uploadMedia failed', err.message);
-    return res.status(500).json({ success: false, message: 'فشل في رفع الوسائط', error: err.message });
+    await logService.create('error', 'media_upload_failed', err.message, workspaceId);
+    console.error('[ERROR] uploadMedia.failed', { error: err.message, workspaceId });
+    return res.status(500).json({ success: false, message: 'Media upload failed', error: err.message });
   }
 }
 
 async function deleteMedia(req, res) {
   const id = req.params.id;
-  const rows = await db.query('SELECT * FROM media WHERE id = ?', [id]);
-  if (!rows.length) return res.status(404).json({ success: false, message: 'الوسائط غير موجودة' });
+  const workspaceId = req.workspaceId || 1;
+  const rows = await db.query('SELECT * FROM media WHERE id = ? AND workspace_id = ?', [id, workspaceId]);
+  if (!rows.length) return res.status(404).json({ success: false, message: 'Media not found' });
+
   const media = rows[0];
-  const filePath = path.join(__dirname, '..', '..', media.path);
-  await db.query('DELETE FROM media WHERE id = ?', [id]);
+  const filePath = mediaStorage.resolveStoredPath(media.path);
+  await db.query('DELETE FROM media WHERE id = ? AND workspace_id = ?', [id, workspaceId]);
   fs.unlink(filePath, () => {});
-  await logService.create('info', 'media_delete', `deleted media ${media.original_name}`);
-  res.json({ success: true, message: 'تم حذف الوسائط' });
+  await logService.create('info', 'media_delete', `deleted media ${media.original_name}`, workspaceId);
+  res.json({ success: true, message: 'Media deleted successfully' });
 }
 
 module.exports = { uploadMedia, deleteMedia };

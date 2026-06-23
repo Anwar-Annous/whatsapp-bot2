@@ -4,6 +4,7 @@ const session = require('express-session');
 const cors = require('cors');
 const { logger, requestLogger } = require('./utils/logger');
 const config = require('./config');
+const mediaStorage = require('./utils/mediaStorage');
 
 const app = express();
 
@@ -27,7 +28,8 @@ app.use((req, res, next) => {
 });
 
 app.use(express.static(path.join(__dirname, '..', 'frontend')));
-app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
+mediaStorage.ensureDir(mediaStorage.UPLOAD_ROOT);
+app.use('/uploads', express.static(mediaStorage.UPLOAD_ROOT));
 
 // Legacy routes (backward compatible, default workspace_id = 1)
 const authRoutes = require('./routes/auth');

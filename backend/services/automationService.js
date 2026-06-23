@@ -18,19 +18,49 @@ async function getAutomation(workspaceId) {
   return automation;
 }
 
+function normalizeStep(step) {
+  if (!step || typeof step !== 'object') return null;
+  if (step.type === 'text') return { type: 'text', text: step.text || '' };
+  if (step.type === 'delay') return { type: 'delay', seconds: normalizeDelaySeconds(step.seconds || 60) || 60 };
+  if (['image', 'video', 'audio', 'file'].includes(step.type)) {
+    const mediaId = Number(step.media_id);
+    if (!Number.isInteger(mediaId) || mediaId <= 0) {
+      throw new Error(`${step.type} automation step is missing media_id`);
+    }
+    const normalized = { type: step.type, media_id: mediaId };
+    if (['image', 'video', 'file'].includes(step.type)) normalized.caption = step.caption || '';
+    return normalized;
+  }
+  return null;
+}
+
 async function saveAutomation(data, workspaceId) {
-  const stepsJson = JSON.stringify(data.steps || []);
+  const rawSteps = Array.isArray(data.steps) ? data.steps : [];
+  console.log('[DEBUG] automationService.saveAutomation.received', { workspaceId, steps: rawSteps, enabled: data.enabled, trigger_mode: data.trigger_mode });
+  const steps = rawSteps.map(normalizeStep).filter(Boolean);
+  const mediaSteps = steps.filter(step => ['image', 'video', 'audio', 'file'].includes(step.type));
+  for (const step of mediaSteps) {
+    const rows = await db.query('SELECT id, type, path, workspace_id FROM media WHERE id = ? AND workspace_id = ?', [step.media_id, workspaceId]);
+    console.log('[DEBUG] automationService.saveAutomation.mediaCheck', { workspaceId, step, rows });
+    if (!rows.length) throw new Error(`${step.type} media ${step.media_id} not found in workspace ${workspaceId}`);
+    if (rows[0].type !== step.type) {
+      throw new Error(`media ${step.media_id} is ${rows[0].type}, not ${step.type}`);
+    }
+  }
+  const stepsJson = JSON.stringify(steps);
   const triggerMode = normalizeTriggerMode(data.trigger_mode);
   const existing = await getAutomation(workspaceId);
   if (existing) {
     await db.query('UPDATE automations SET enabled = ?, steps_json = ?, cooldown_hours = ?, trigger_mode = ? WHERE id = ? AND workspace_id = ?', [
       data.enabled ? 1 : 0, stepsJson, data.cooldown_hours || 24, triggerMode, existing.id, workspaceId
     ]);
+    console.log('[DEBUG] automationService.saveAutomation.updated', { workspaceId, automationId: existing.id, steps });
     return existing.id;
   }
   const result = await db.query('INSERT INTO automations (enabled, steps_json, cooldown_hours, trigger_mode, workspace_id) VALUES (?, ?, ?, ?, ?)', [
     data.enabled ? 1 : 0, stepsJson, data.cooldown_hours || 24, triggerMode, workspaceId
   ]);
+  console.log('[DEBUG] automationService.saveAutomation.inserted', { workspaceId, automationId: result.insertId, steps });
   return result.insertId;
 }
 
@@ -90,9 +120,9 @@ async function scheduleAutomationSteps(chatId, conversationId, steps, workspaceI
       delaySeconds += getStepDelaySeconds(step);
       continue;
     }
-    if (!['text', 'image', 'audio', 'video'].includes(step.type)) continue;
+    if (!['text', 'image', 'audio', 'video', 'file'].includes(step.type)) continue;
     if (step.type === 'text' && !step.text) continue;
-    if ((['image', 'audio', 'video'].includes(step.type)) && !step.media_id) continue;
+    if ((['image', 'audio', 'video', 'file'].includes(step.type)) && !step.media_id) continue;
 
     const scheduledAt = new Date(Date.now() + (delaySeconds * 1000));
     await db.query(
@@ -121,8 +151,8 @@ async function processScheduledMessages(sendText, sendMediaById) {
       if (row.type === 'text' && row.text) {
         await sendText(row.chat_id, row.text);
       }
-      if ((['image', 'audio', 'video'].includes(row.type)) && row.media_id) {
-        await sendMediaById(row.chat_id, row.media_id, row.type, (row.type === 'image' || row.type === 'video') ? row.text : null);
+      if ((['image', 'audio', 'video', 'file'].includes(row.type)) && row.media_id) {
+        await sendMediaById(row.chat_id, row.media_id, row.type, (row.type === 'image' || row.type === 'video' || row.type === 'file') ? row.text : null);
       }
       await db.query('UPDATE scheduled_messages SET status = ?, updated_at = NOW() WHERE id = ?', ['sent', row.id]);
       await logService.create('info', 'scheduled_sent', `scheduled ${row.type} sent to ${row.chat_id}`, row.workspace_id);
@@ -139,10 +169,14 @@ async function runAutomation(sendText, sendMediaById, chat, conversationId, cont
   const automation = await getAutomation(workspaceId);
   console.log('[TRACE] runAutomation called', { chat, conversationId, workspaceId });
   console.log('[TRACE] automation loaded', { automationId: automation && automation.id, enabled: automation && automation.enabled });
-  if (!automation || !automation.enabled) return false;
+  if (!automation || !automation.enabled) {
+    console.log('[TRACE] runAutomation stopping', { chat, workspaceId, automationLoaded: !!automation, enabled: automation?.enabled });
+    return false;
+  }
   const decision = getRunDecision(automation, context);
   console.log('[TRACE] getRunDecision result', decision);
   if (!decision.allowed) {
+    console.log('[TRACE] runAutomation skipped', { chat, workspaceId, decision });
     await logService.create('info', 'automation_skipped', `${decision.reason} for ${chat}`, workspaceId);
     return false;
   }
@@ -165,19 +199,28 @@ async function runAutomation(sendText, sendMediaById, chat, conversationId, cont
     try {
       let sent = false;
       if (step.type === 'text' && step.text) {
+        console.log('[TRACE] automation step text -> sendText', { chat, step, workspaceId });
         await sendText(chat, step.text);
         sent = true;
       }
       if (step.type === 'image' && step.media_id) {
+        console.log('[TRACE] automation step image -> sendMediaById', { chat, step, workspaceId });
         await sendMediaById(chat, step.media_id, 'image', (step.caption || '').trim() || null);
         sent = true;
       }
       if (step.type === 'video' && step.media_id) {
+        console.log('[TRACE] automation step video -> sendMediaById', { chat, step, workspaceId });
         await sendMediaById(chat, step.media_id, 'video', (step.caption || '').trim() || null);
         sent = true;
       }
       if (step.type === 'audio' && step.media_id) {
+        console.log('[TRACE] automation step audio -> sendMediaById', { chat, step, workspaceId });
         await sendMediaById(chat, step.media_id, 'audio');
+        sent = true;
+      }
+      if (step.type === 'file' && step.media_id) {
+        console.log('[TRACE] automation step file -> sendMediaById', { chat, step, workspaceId });
+        await sendMediaById(chat, step.media_id, 'file', (step.caption || '').trim() || null);
         sent = true;
       }
       if (sent) {
@@ -185,6 +228,7 @@ async function runAutomation(sendText, sendMediaById, chat, conversationId, cont
       }
     } catch (err) {
       const stepLabel = step.media_id ? `${step.type} media ${step.media_id}` : step.type;
+      console.error('[ERROR] automation step failed', { stepLabel, error: err.message, workspaceId, chat });
       await logService.create('error', 'automation_error', `${stepLabel}: ${err.message || String(err)}`, workspaceId);
     }
   }

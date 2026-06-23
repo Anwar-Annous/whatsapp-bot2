@@ -7,6 +7,7 @@ const logService = require('../logService');
 const automationService = require('../automationService');
 const config = require('../../config');
 const { logger } = require('../../utils/logger');
+const mediaStorage = require('../../utils/mediaStorage');
 
 const SEND_TIMEOUT_MS = 30000;
 const AUDIO_SEND_TIMEOUT_MS = 45000;
@@ -44,6 +45,10 @@ function getMediaSendOptions(mediaType, filePath, messageMedia, caption = '') {
   }
   if ((mediaType === 'image' || mediaType === 'video') && cleanCaption) {
     options.caption = cleanCaption;
+  }
+  if (mediaType === 'file') {
+    options.sendMediaAsDocument = true;
+    if (cleanCaption) options.caption = cleanCaption;
   }
   return options;
 }
@@ -151,7 +156,7 @@ class ClientWrapper {
   }
 
   async sendClientMessage(chatId, content, options, label, timeoutMs = SEND_TIMEOUT_MS) {
-    this.logger.info('sendClientMessage.start', { label, chatId, workspaceId: this.workspaceId });
+    this.logger.info('sendClientMessage.start', { label, chatId, workspaceId: this.workspaceId, options });
     try {
       const res = await withTimeout(this.client.sendMessage(chatId, content, options), timeoutMs, label);
       this.logger.info('sendClientMessage.success', { label, chatId, workspaceId: this.workspaceId });
@@ -164,7 +169,7 @@ class ClientWrapper {
 
   async sendText(chatId, text) {
     if (!this.client) throw new Error('Client not initialized');
-    this.logger.info('sendText.called', { chatId, workspaceId: this.workspaceId });
+    this.logger.info('sendText.called', { chatId, workspaceId: this.workspaceId, length: String(text || '').length });
     await this.enqueueOutgoing(async () => {
       try {
         await this.sendClientMessage(chatId, text, undefined, `text to ${chatId}`);
@@ -181,24 +186,44 @@ class ClientWrapper {
     if (!this.client) throw new Error('Client not initialized');
     this.logger.info('sendMediaById.called', { chatId, mediaId, requestedType: type, workspaceId: this.workspaceId });
     const rows = await db.query('SELECT * FROM media WHERE id = ? AND workspace_id = ?', [mediaId, this.workspaceId]);
-    if (!rows.length) throw new Error('Media not found');
+    this.logger.info('sendMediaById.dbResult', { mediaId, rowCount: rows.length, rows, workspaceId: this.workspaceId });
+    if (!rows.length) throw new Error(`Media not found: ${mediaId}`);
     const media = rows[0];
-    const filePath = path.join(process.cwd(), media.path);
-    this.logger.info('sendMediaById.mediaRow', { id: media.id, typeInDb: media.type, path: media.path, workspaceId: this.workspaceId });
-    if (!fs.existsSync(filePath)) {
-      this.logger.error('sendMediaById.missingFile', { filePath, workspaceId: this.workspaceId });
+    const filePath = mediaStorage.resolveStoredPath(media.path);
+    const fileExists = fs.existsSync(filePath);
+    this.logger.info('sendMediaById.resolvedPath', {
+      mediaId,
+      requestedType: type,
+      mediaRow: media,
+      storedPath: media.path,
+      filePath,
+      fileExists,
+      workspaceId: this.workspaceId
+    });
+    if (!fileExists) {
+      this.logger.error('sendMediaById.missingFile', { mediaId, filePath, storedPath: media.path, workspaceId: this.workspaceId });
       throw new Error(`Media file not found: ${media.path}`);
     }
     const messageMedia = MessageMedia.fromFilePath(filePath);
     const mediaType = type || media.type;
     const options = getMediaSendOptions(mediaType, filePath, messageMedia, caption);
     const timeoutMs = (mediaType === 'audio' || mediaType === 'video') ? AUDIO_SEND_TIMEOUT_MS : SEND_TIMEOUT_MS;
+    this.logger.info('sendMediaById.prepared', {
+      chatId,
+      mediaId,
+      mediaType,
+      mimetype: messageMedia.mimetype,
+      filename: messageMedia.filename,
+      options,
+      timeoutMs,
+      workspaceId: this.workspaceId
+    });
     await this.enqueueOutgoing(async () => {
       try {
         await this.sendClientMessage(chatId, messageMedia, options, `${mediaType} to ${chatId}`, timeoutMs);
-        this.logger.info('sendMediaById.sent', { chatId, mediaId, mediaType, workspaceId: this.workspaceId });
+        this.logger.info('sendMediaById.sent', { chatId, mediaId, mediaType, filePath, workspaceId: this.workspaceId });
       } catch (err) {
-        this.logger.error('sendMediaById.error', { chatId, mediaId, error: err.message, workspaceId: this.workspaceId });
+        this.logger.error('sendMediaById.error', { chatId, mediaId, mediaType, filePath, error: err.message, workspaceId: this.workspaceId });
         throw err;
       }
       await new Promise(r => setTimeout(r, (mediaType === 'audio' || mediaType === 'video') ? 1400 : 900));
@@ -272,15 +297,11 @@ class ClientWrapper {
         const media = await message.downloadMedia();
         const ext = getMediaExtension(media.mimetype);
         const filename = `${Date.now()}-${phone}.${ext}`;
-        let folder = 'uploads/audio';
-        if (media.mimetype.startsWith('image/')) folder = 'uploads/images';
-        else if (media.mimetype.startsWith('video/')) folder = 'uploads/video';
-        const fullPath = path.join(process.cwd(), folder, filename);
-        if (!fs.existsSync(path.join(process.cwd(), folder))) {
-          fs.mkdirSync(path.join(process.cwd(), folder), { recursive: true });
-        }
+        const folder = mediaStorage.getUploadDir(media.mimetype);
+        mediaStorage.ensureDir(folder);
+        const fullPath = path.join(folder, filename);
         fs.writeFileSync(fullPath, Buffer.from(media.data, 'base64'));
-        mediaPath = path.relative(process.cwd(), fullPath).replace(/\\/g, '/');
+        mediaPath = mediaStorage.toStoredPath(fullPath);
         body = `ملف ${type}`;
       }
 
@@ -328,11 +349,13 @@ class ClientWrapper {
       await logService.create('info', 'incoming_message', `from ${phone}`, this.workspaceId);
 
       this.logger.info('automation.invoking', { chatId, conversationId: conversation.id, workspaceId: this.workspaceId });
+      console.log('[TRACE] handleIncomingMessage automation.invoking', { chatId, conversationId: conversation.id, workspaceId: this.workspaceId, isNew });
       const autoSent = await automationService.runAutomation(
         (cid, text) => this.sendText(cid, text),
         (cid, mid, t, cap) => this.sendMediaById(cid, mid, t, cap),
         chatId, conversation.id, { isNew, conversation, workspaceId: this.workspaceId }
       );
+      console.log('[TRACE] handleIncomingMessage automation result', { chatId, conversationId: conversation.id, autoSent, workspaceId: this.workspaceId });
       if (autoSent) {
         this.emit('automation_triggered', { chatId, conversationId: conversation.id });
       }

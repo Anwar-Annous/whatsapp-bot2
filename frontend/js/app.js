@@ -67,7 +67,7 @@
     return res.json();
   }
   async function apiDelete(path) {
-    const res = await fetch(path, { method: 'DELETE', credentials: 'same-origin' });
+    const res = await fetch(path, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-Workspace-Id': String(currentWorkspace) } });
     return res.json();
   }
 
@@ -151,7 +151,7 @@
     container.innerHTML = '';
     automationSteps.forEach((step, index) => {
       const card = document.createElement('div'); card.className = 'card automation-step-card border-0 p-3 mb-3';
-      const label = step.type === 'text' ? 'نص' : step.type === 'image' ? 'صورة' : step.type === 'video' ? 'فيديو' : step.type === 'audio' ? 'صوت' : 'مؤقت';
+      const label = step.type === 'text' ? 'نص' : step.type === 'image' ? 'صورة' : step.type === 'video' ? 'فيديو' : step.type === 'audio' ? 'صوت' : step.type === 'file' ? 'ملف' : 'مؤقت';
       let inner = '';
       if (step.type === 'text') inner = `<textarea class="form-control step-text" data-index="${index}" rows="3">${escapeHtml(step.text || '')}</textarea>`;
       else if (step.type === 'image' || step.type === 'video') {
@@ -160,6 +160,9 @@
       } else if (step.type === 'audio') {
         const mediaLabel = step.media_id ? (step.filename || 'تم رفع ملف') : 'لم يتم اختيار ملف بعد';
         inner = `<div class="mb-2"><strong>${mediaLabel}</strong></div><input type="file" class="form-control form-control-sm step-upload" data-index="${index}" accept="audio/*" />`;
+      } else if (step.type === 'file') {
+        const mediaLabel = step.media_id ? (step.filename || 'تم رفع ملف') : 'لم يتم اختيار ملف بعد';
+        inner = `<div class="mb-2"><strong>${mediaLabel}</strong></div><input type="file" class="form-control form-control-sm mb-2 step-upload" data-index="${index}" accept=".pdf,.txt,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip" /><textarea class="form-control step-caption" data-index="${index}" rows="2" placeholder="كابشن">${escapeHtml(step.caption || '')}</textarea>`;
       } else if (step.type === 'delay') inner = `<input type="number" class="form-control step-delay" data-index="${index}" value="${step.seconds || 60}" min="1" />`;
       card.innerHTML = `<div class="d-flex justify-content-between align-items-center mb-2"><strong>${label}</strong><button class="btn btn-sm btn-outline-light remove-step" data-index="${index}">✕</button></div>${inner}`;
       container.appendChild(card);
@@ -193,18 +196,49 @@
     });
 
     // file uploads
-    container.querySelectorAll('.step-upload').forEach(inp => inp.addEventListener('change', async (e) => { const idx = Number(e.target.dataset.index); const file = e.target.files[0]; if (!file) return; const fd = new FormData(); fd.append('media', file); const res = await fetch('/api/media/upload', { method: 'POST', body: fd, credentials: 'same-origin' }); const data = await res.json(); if (data.success) { automationSteps[idx].media_id = data.id; automationSteps[idx].filename = data.filename; renderAutomationSteps(); } }));
+    container.querySelectorAll('.step-upload').forEach(inp => inp.addEventListener('change', async (e) => {
+      const idx = Number(e.target.dataset.index);
+      const file = e.target.files[0];
+      if (!file) return;
+      const fd = new FormData();
+      fd.append('media', file);
+      console.log('[DEBUG] frontend.automation.upload.start', { index: idx, stepType: automationSteps[idx]?.type, workspaceId: getWorkspaceId(), name: file.name, type: file.type, size: file.size });
+      const res = await fetch('/api/media/upload', { method: 'POST', body: fd, credentials: 'same-origin', headers: { 'X-Workspace-Id': String(currentWorkspace) } });
+      const data = await res.json();
+      console.log('[DEBUG] frontend.automation.upload.response', data);
+      if (!data.success) {
+        alert(data.message || 'Upload failed');
+        return;
+      }
+      if (data.type !== automationSteps[idx]?.type) {
+        alert(`Selected file is ${data.type}, but this step expects ${automationSteps[idx]?.type}`);
+        return;
+      }
+      automationSteps[idx].media_id = data.id;
+      automationSteps[idx].filename = data.filename;
+      renderAutomationSteps();
+    }));
   }
   async function saveAutomation() {
-    const steps = automationSteps.map(s => { if (s.type === 'text') return { type: 'text', text: s.text || '' }; if (s.type === 'image' || s.type === 'video') return { type: s.type, media_id: s.media_id || '', caption: s.caption || '' }; if (s.type === 'audio') return { type: 'audio', media_id: s.media_id || '' }; if (s.type === 'delay') return { type: 'delay', seconds: Number(s.seconds) || 60 }; return s; });
+    const steps = automationSteps.map(s => { if (s.type === 'text') return { type: 'text', text: s.text || '' }; if (s.type === 'image' || s.type === 'video' || s.type === 'file') return { type: s.type, media_id: s.media_id || '', caption: s.caption || '' }; if (s.type === 'audio') return { type: 'audio', media_id: s.media_id || '' }; if (s.type === 'delay') return { type: 'delay', seconds: Number(s.seconds) || 60 }; return s; });
+    const invalidStep = steps.find(s => ['image', 'video', 'audio', 'file'].includes(s.type) && !Number(s.media_id));
+    if (invalidStep) {
+      alert(`Please upload/select a ${invalidStep.type} file before saving automation.`);
+      console.warn('[WARN] frontend.saveAutomation.blockedEmptyMediaId', { invalidStep, steps, workspaceId: getWorkspaceId() });
+      return;
+    }
     const data = { enabled: document.getElementById('automationEnabled')?.checked ?? true, cooldown_hours: document.getElementById('cooldownHours')?.value || 24, steps, trigger_mode: document.querySelector('input[name="automationTriggerMode"]:checked')?.value || 'first_message' };
     try {
       const res = await apiPost('/api/automation', data);
       console.log('[DEBUG] frontend.saveAutomation - response:', res, 'workspaceId:', getWorkspaceId());
+      if (!res.success) {
+        alert(res.message || 'Failed to save automation');
+        return;
+      }
       alert('تم حفظ الأتمتة');
     } catch (e) { console.error('saveAutomation:', e); }
   }
-  function addAutomationStep(type) { if (type === 'text') automationSteps.push({ type: 'text', text: '' }); else if (type === 'image') automationSteps.push({ type: 'image', media_id: '', caption: '' }); else if (type === 'video') automationSteps.push({ type: 'video', media_id: '', caption: '' }); else if (type === 'audio') automationSteps.push({ type: 'audio', media_id: '' }); else if (type === 'delay') automationSteps.push({ type: 'delay', seconds: 60 }); renderAutomationSteps(); }
+  function addAutomationStep(type) { if (type === 'text') automationSteps.push({ type: 'text', text: '' }); else if (type === 'image') automationSteps.push({ type: 'image', media_id: '', caption: '' }); else if (type === 'video') automationSteps.push({ type: 'video', media_id: '', caption: '' }); else if (type === 'audio') automationSteps.push({ type: 'audio', media_id: '' }); else if (type === 'file') automationSteps.push({ type: 'file', media_id: '', caption: '' }); else if (type === 'delay') automationSteps.push({ type: 'delay', seconds: 60 }); renderAutomationSteps(); }
 
   // ================= MEDIA =================
   async function loadMedia() {
@@ -212,14 +246,14 @@
     try { const res = await apiGet('/api/media'); if (!res.success) return; gallery.innerHTML = '';
       res.media.forEach(item => {
         const card = document.createElement('div'); card.className = 'col-12 col-md-6';
-        const preview = item.type === 'image' ? `<img src="/${item.path}" class="img-fluid rounded mb-2" alt="صورة" />` : item.type === 'video' ? `<video controls src="/${item.path}" class="w-100 rounded mb-2" style="max-height:200px;"></video>` : `<audio controls src="/${item.path}" class="w-100 mb-2"></audio>`;
+        const preview = item.type === 'image' ? `<img src="/${item.path}" class="img-fluid rounded mb-2" alt="صورة" />` : item.type === 'video' ? `<video controls src="/${item.path}" class="w-100 rounded mb-2" style="max-height:200px;"></video>` : item.type === 'audio' ? `<audio controls src="/${item.path}" class="w-100 mb-2"></audio>` : `<a class="btn btn-sm btn-outline-light mb-2" href="/${item.path}" target="_blank" rel="noopener">Open file</a>`;
         card.innerHTML = `<div class="card bg-secondary border-0 p-3 h-100"><div class="d-flex justify-content-between align-items-start mb-2"><span class="badge bg-info">ID ${item.id}</span><button class="btn btn-sm btn-danger del-media" data-id="${item.id}">حذف</button></div>${preview}<div class="small text-muted">${escapeHtml(item.original_name)}</div></div>`;
         gallery.appendChild(card);
       });
       gallery.querySelectorAll('.del-media').forEach(btn => btn.addEventListener('click', async () => { await apiDelete(`/api/media/${btn.dataset.id}`); loadMedia(); }));
     } catch (e) { console.error('loadMedia:', e); }
   }
-  async function onUpload(e) { e.preventDefault(); const inp = e.target.querySelector('input[name="media"]'); if (!inp?.files?.length) return; const fd = new FormData(); fd.append('media', inp.files[0]); try { await fetch('/api/media/upload', { method: 'POST', body: fd, credentials: 'same-origin' }); inp.value = ''; loadMedia(); } catch (e) { console.error('upload:', e); } }
+  async function onUpload(e) { e.preventDefault(); const inp = e.target.querySelector('input[name="media"]'); if (!inp?.files?.length) return; const fd = new FormData(); fd.append('media', inp.files[0]); try { await fetch('/api/media/upload', { method: 'POST', body: fd, credentials: 'same-origin', headers: { 'X-Workspace-Id': String(currentWorkspace) } }); inp.value = ''; loadMedia(); } catch (e) { console.error('upload:', e); } }
 
   // ================= LOGS =================
   async function loadLogs() { const list = document.getElementById('logItems'); if (!list) return; try { const res = await apiGet('/api/logs'); if (!res.success) return; list.innerHTML = ''; res.logs.forEach(l => { const item = document.createElement('div'); item.className = 'list-group-item bg-secondary border-0'; item.innerHTML = `<div><strong>${escapeHtml(l.event)}</strong></div><div class="small text-muted">${escapeHtml(formatDate(l.created_at))} - ${escapeHtml(l.details)}</div>`; list.appendChild(item); }); } catch (e) { console.error('loadLogs:', e); } }
@@ -330,6 +364,7 @@
     document.getElementById('addImageStepBtn')?.addEventListener('click', () => addAutomationStep('image'));
     document.getElementById('addAudioStepBtn')?.addEventListener('click', () => addAutomationStep('audio'));
     document.getElementById('addVideoStepBtn')?.addEventListener('click', () => addAutomationStep('video'));
+    document.getElementById('addFileStepBtn')?.addEventListener('click', () => addAutomationStep('file'));
     document.getElementById('addDelayStepBtn')?.addEventListener('click', () => addAutomationStep('delay'));
     document.getElementById('saveAutomationBtn')?.addEventListener('click', saveAutomation);
     document.getElementById('cancelDraftBtn')?.addEventListener('click', () => { automationSteps = []; renderAutomationSteps(); });

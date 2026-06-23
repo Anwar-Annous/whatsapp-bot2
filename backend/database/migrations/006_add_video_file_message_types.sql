@@ -1,4 +1,3 @@
--- Migration 005: add video and file types to media.type enum
-ALTER TABLE media MODIFY COLUMN type ENUM('image','audio','video','file') NOT NULL;
+-- Migration 006: allow video/file records in message history and scheduled automation
 ALTER TABLE messages MODIFY COLUMN type ENUM('text','image','audio','video','file') DEFAULT 'text';
 ALTER TABLE scheduled_messages MODIFY COLUMN type ENUM('text','image','audio','video','file') NOT NULL;
