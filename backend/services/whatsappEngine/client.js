@@ -1,5 +1,7 @@
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+const { execFile } = require('child_process');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const db = require('../../database/db');
@@ -12,6 +14,7 @@ const mediaStorage = require('../../utils/mediaStorage');
 const SEND_TIMEOUT_MS = 30000;
 const AUDIO_SEND_TIMEOUT_MS = 45000;
 const RECONNECT_DELAY_MS = 5000;
+const MAX_RECONNECT_DELAY_MS = 60000;
 
 function getMediaExtension(mime) {
   if (mime.includes('image')) return 'jpg';
@@ -61,6 +64,52 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+function execFileQuiet(command, args) {
+  return new Promise((resolve) => {
+    execFile(command, args, { windowsHide: true }, () => resolve());
+  });
+}
+
+async function killProcessTree(pid, logger) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0 || numericPid === process.pid) return false;
+  try {
+    process.kill(numericPid, 0);
+  } catch (err) {
+    return false;
+  }
+
+  logger.warn('Killing stale Chromium process', { pid: numericPid });
+  if (process.platform === 'win32') {
+    await execFileQuiet('taskkill.exe', ['/PID', String(numericPid), '/T', '/F']);
+  } else {
+    try {
+      process.kill(-numericPid, 'SIGKILL');
+    } catch (err) {
+      try {
+        process.kill(numericPid, 'SIGKILL');
+      } catch (killErr) {
+        logger.debug('Failed to kill stale Chromium process', { pid: numericPid, error: killErr.message });
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+function extractPidFromSingletonLock(lockPath) {
+  try {
+    const stat = fs.lstatSync(lockPath);
+    const text = stat.isSymbolicLink()
+      ? fs.readlinkSync(lockPath)
+      : fs.readFileSync(lockPath, 'utf8');
+    const parts = String(text).match(/\d+/g) || [];
+    return parts.length ? Number(parts[parts.length - 1]) : null;
+  } catch (err) {
+    return null;
+  }
+}
+
 class ClientWrapper {
   constructor(workspaceId, io) {
     this.workspaceId = workspaceId;
@@ -98,6 +147,7 @@ class ClientWrapper {
     const lockFiles = [
       'SingletonLock',
       'SingletonSocket',
+      'SingletonCookie',
       'lock',
       'DevToolsActivePort',
       'Local State'
@@ -119,9 +169,32 @@ class ClientWrapper {
     }
   }
 
+  async cleanupStaleChromiumState() {
+    const browserProcess = this.client?.pupBrowser?.process?.();
+    if (browserProcess?.pid) {
+      await killProcessTree(browserProcess.pid, this.logger);
+    }
+
+    const lockPaths = [
+      path.join(this.sessionDir, 'SingletonLock'),
+      path.join(this.sessionDir, 'Default', 'SingletonLock')
+    ];
+    for (const lockPath of lockPaths) {
+      if (!fs.existsSync(lockPath)) continue;
+      const lockPid = extractPidFromSingletonLock(lockPath);
+      if (lockPid) {
+        await killProcessTree(lockPid, this.logger);
+      } else if (os.platform() !== 'win32') {
+        this.logger.debug('Could not extract PID from SingletonLock', { lockPath });
+      }
+    }
+
+    this.cleanupOldProfileLockFiles();
+  }
+
   async createClient() {
     await this.ensureSessionDir();
-    this.cleanupOldProfileLockFiles();
+    await this.cleanupStaleChromiumState();
     const baseOpts = Object.assign({}, config.whatsapp.puppeteer || {});
     let puppeteerOpts = baseOpts;
     if (puppeteerOpts.executablePath && typeof puppeteerOpts.executablePath.then === 'function') {
@@ -290,7 +363,11 @@ class ClientWrapper {
     if (!this.client || !this.eventHandlers) return;
     Object.entries(this.eventHandlers).forEach(([event, handler]) => {
       try {
-        this.client.off(event, handler);
+        if (event === 'browserDisconnected') {
+          this.client.pupBrowser?.off?.('disconnected', handler);
+        } else {
+          this.client.off(event, handler);
+        }
       } catch (err) {
         this.logger.debug('Failed to remove event handler', { event, error: err.message });
       }
@@ -309,6 +386,7 @@ class ClientWrapper {
         this.logger.info('Client destroyed successfully');
       } catch (err) {
         this.logger.warn('Client destruction failed', { error: err.message });
+        await this.cleanupStaleChromiumState();
       } finally {
         this.destroyPromise = null;
       }
@@ -364,6 +442,14 @@ class ClientWrapper {
       const contactId = await this.findOrCreateContact(phone, name);
       const { conversation, isNew } = await this.findOrCreateConversation(chatId, contactId, body);
       if (!conversation) throw new Error(`Conversation not available for ${chatId}`);
+      this.logger.info('incoming_message.context', {
+        workspaceId: this.workspaceId,
+        phone,
+        chatId,
+        contactId,
+        conversationId: conversation.id,
+        isNew
+      });
 
       this.logger.info('db.query', { sql: 'INSERT INTO messages (conversation_id, sender, body, type, media_path, direction, workspace_id, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())', params: [conversation.id, 'client', body, type, mediaPath, 'in', this.workspaceId], workspaceId: this.workspaceId });
       const msgRes = await db.query('INSERT INTO messages (conversation_id, sender, body, type, media_path, direction, workspace_id, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())', [conversation.id, 'client', body, type, mediaPath, 'in', this.workspaceId]);
@@ -376,7 +462,7 @@ class ClientWrapper {
       const autoSent = await automationService.runAutomation(
         (cid, text) => this.sendText(cid, text),
         (cid, mid, t, cap) => this.sendMediaById(cid, mid, t, cap),
-        chatId, conversation.id, { isNew, conversation, workspaceId: this.workspaceId }
+        chatId, conversation.id, { isNew, conversation, workspaceId: this.workspaceId, phone, contactId }
       );
       console.log('[TRACE] handleIncomingMessage automation result', { chatId, conversationId: conversation.id, autoSent, workspaceId: this.workspaceId });
       if (autoSent) {
@@ -446,17 +532,35 @@ class ClientWrapper {
     this.logger.info('attachEvents.complete', { workspaceId: this.workspaceId, events: Object.keys(this.eventHandlers) });
   }
 
+  attachBrowserCrashHandler() {
+    const browser = this.client?.pupBrowser;
+    if (!browser || this.eventHandlers.browserDisconnected) return;
+    this.eventHandlers.browserDisconnected = async () => {
+      this.logger.error('Chromium browser disconnected', { workspaceId: this.workspaceId });
+      this.updateStatus('disconnected', null, false);
+      this.emit('disconnected', { reason: 'chromium_disconnected' });
+      this.emitUpdate();
+      try {
+        await this.cleanupStaleChromiumState();
+      } catch (err) {
+        this.logger.debug('Chromium cleanup after disconnect failed', { error: err.message });
+      }
+      if (!this.shutdownRequested && !this.logoutDetected) {
+        this.scheduleReconnect();
+      }
+    };
+    browser.on('disconnected', this.eventHandlers.browserDisconnected);
+  }
+
   scheduleReconnect() {
     if (this.reconnectTimer) return;
-    if (this.initializeAttempts >= 3) {
-      this.logger.error('Reconnect aborted because initialize failed too many times', { attempts: this.initializeAttempts });
-      return;
-    }
+    const delay = Math.min(RECONNECT_DELAY_MS * Math.max(1, this.initializeAttempts), MAX_RECONNECT_DELAY_MS);
+    this.logger.warn('Reconnect scheduled', { delayMs: delay, attempts: this.initializeAttempts, workspaceId: this.workspaceId });
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.initialize().catch(err => this.logger.error('Reconnect failed', { error: err.message }));
-    }, RECONNECT_DELAY_MS);
+    }, delay);
   }
 
   async initialize() {
@@ -475,6 +579,7 @@ class ClientWrapper {
           await this.safeDestroyClient();
           this.client = null;
         }
+        await this.cleanupStaleChromiumState();
 
         if (this.reconnectTimer) {
           clearTimeout(this.reconnectTimer);
@@ -488,6 +593,7 @@ class ClientWrapper {
         this.emitUpdate();
 
         await this.client.initialize();
+        this.attachBrowserCrashHandler();
         this.initializeAttempts = 0;
       } catch (err) {
         this.initializeAttempts += 1;

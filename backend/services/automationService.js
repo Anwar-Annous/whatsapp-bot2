@@ -167,16 +167,24 @@ async function processScheduledMessages(sendText, sendMediaById) {
 async function runAutomation(sendText, sendMediaById, chat, conversationId, context = {}) {
   const workspaceId = context.workspaceId || 1;
   const automation = await getAutomation(workspaceId);
-  console.log('[TRACE] runAutomation called', { chat, conversationId, workspaceId });
-  console.log('[TRACE] automation loaded', { automationId: automation && automation.id, enabled: automation && automation.enabled });
+  const diagnosticContext = {
+    workspaceId,
+    phone: context.phone,
+    chatId: chat,
+    contactId: context.contactId,
+    conversationId,
+    automationId: automation && automation.id
+  };
+  console.log('[TRACE] runAutomation called', diagnosticContext);
+  console.log('[TRACE] automation loaded', { ...diagnosticContext, enabled: automation && automation.enabled, stepsCount: automation?.steps?.length || 0 });
   if (!automation || !automation.enabled) {
-    console.log('[TRACE] runAutomation stopping', { chat, workspaceId, automationLoaded: !!automation, enabled: automation?.enabled });
+    console.log('[TRACE] runAutomation stopping', { ...diagnosticContext, automationLoaded: !!automation, enabled: automation?.enabled });
     return false;
   }
   const decision = getRunDecision(automation, context);
-  console.log('[TRACE] getRunDecision result', decision);
+  console.log('[TRACE] getRunDecision result', { ...diagnosticContext, decision });
   if (!decision.allowed) {
-    console.log('[TRACE] runAutomation skipped', { chat, workspaceId, decision });
+    console.log('[TRACE] runAutomation skipped', { ...diagnosticContext, decision });
     await logService.create('info', 'automation_skipped', `${decision.reason} for ${chat}`, workspaceId);
     return false;
   }
@@ -187,7 +195,7 @@ async function runAutomation(sendText, sendMediaById, chat, conversationId, cont
     const step = automation.steps[index];
     if (!step || !step.type) continue;
 
-    console.log('[TRACE] executing automation step', { index, step });
+    console.log('[TRACE] executing automation step', { ...diagnosticContext, index, step });
     const delaySeconds = getStepDelaySeconds(step);
     if (step.type === 'delay' && delaySeconds > 0) {
       const pendingSteps = automation.steps.slice(index + 1);
@@ -199,42 +207,44 @@ async function runAutomation(sendText, sendMediaById, chat, conversationId, cont
     try {
       let sent = false;
       if (step.type === 'text' && step.text) {
-        console.log('[TRACE] automation step text -> sendText', { chat, step, workspaceId });
+        console.log('[TRACE] automation step text -> sendText', { ...diagnosticContext, index, step });
         await sendText(chat, step.text);
         sent = true;
       }
       if (step.type === 'image' && step.media_id) {
-        console.log('[TRACE] automation step image -> sendMediaById', { chat, step, workspaceId });
+        console.log('[TRACE] automation step image -> sendMediaById', { ...diagnosticContext, index, step });
         await sendMediaById(chat, step.media_id, 'image', (step.caption || '').trim() || null);
         sent = true;
       }
       if (step.type === 'video' && step.media_id) {
-        console.log('[TRACE] automation step video -> sendMediaById', { chat, step, workspaceId });
+        console.log('[TRACE] automation step video -> sendMediaById', { ...diagnosticContext, index, step });
         await sendMediaById(chat, step.media_id, 'video', (step.caption || '').trim() || null);
         sent = true;
       }
       if (step.type === 'audio' && step.media_id) {
-        console.log('[TRACE] automation step audio -> sendMediaById', { chat, step, workspaceId });
+        console.log('[TRACE] automation step audio -> sendMediaById', { ...diagnosticContext, index, step });
         await sendMediaById(chat, step.media_id, 'audio');
         sent = true;
       }
       if (step.type === 'file' && step.media_id) {
-        console.log('[TRACE] automation step file -> sendMediaById', { chat, step, workspaceId });
+        console.log('[TRACE] automation step file -> sendMediaById', { ...diagnosticContext, index, step });
         await sendMediaById(chat, step.media_id, 'file', (step.caption || '').trim() || null);
         sent = true;
       }
       if (sent) {
+        console.log('[TRACE] automation step sent', { ...diagnosticContext, index, type: step.type, mediaId: step.media_id || null });
         await logService.create('info', 'automation_step', `sent ${step.type} to ${chat}`, workspaceId);
       }
     } catch (err) {
       const stepLabel = step.media_id ? `${step.type} media ${step.media_id}` : step.type;
-      console.error('[ERROR] automation step failed', { stepLabel, error: err.message, workspaceId, chat });
+      console.error('[ERROR] automation step failed', { ...diagnosticContext, index, stepLabel, error: err.message });
       await logService.create('error', 'automation_error', `${stepLabel}: ${err.message || String(err)}`, workspaceId);
     }
   }
 
   await markRun(automation.id, conversationId);
   await db.query('UPDATE conversations SET status = ? WHERE id = ?', ['Seen', conversationId]);
+  console.log('[TRACE] runAutomation complete', diagnosticContext);
   return true;
 }
 

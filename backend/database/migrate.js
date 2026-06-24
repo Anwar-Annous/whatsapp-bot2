@@ -35,7 +35,18 @@ async function runMigration(filename) {
   try {
     await conn.beginTransaction();
     for (const stmt of statements) {
-      await conn.execute(stmt + ';');
+      try {
+        await conn.execute(stmt + ';');
+      } catch (err) {
+        const lowerStmt = stmt.toLowerCase();
+        const ignorableMissingDrop = err.code === 'ER_CANT_DROP_FIELD_OR_KEY' && lowerStmt.includes('drop index');
+        const ignorableDuplicateIndex = err.code === 'ER_DUP_KEYNAME' && lowerStmt.includes('add unique key');
+        if (ignorableMissingDrop || ignorableDuplicateIndex) {
+          console.warn(`  ! ${filename}: ignored idempotent index error: ${err.message}`);
+          continue;
+        }
+        throw err;
+      }
     }
     await conn.execute('INSERT INTO schema_migrations (filename) VALUES (?)', [filename]);
     await conn.commit();
