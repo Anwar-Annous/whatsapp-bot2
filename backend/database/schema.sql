@@ -12,17 +12,20 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS contacts (
   id INT AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(255) DEFAULT '',
-  phone VARCHAR(50) NOT NULL UNIQUE,
+  phone VARCHAR(50) NOT NULL,
+  workspace_id INT DEFAULT 1,
   tags VARCHAR(255) DEFAULT '',
   notes TEXT,
   last_interaction DATETIME,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_contacts_phone_workspace (phone, workspace_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS conversations (
   id INT AUTO_INCREMENT PRIMARY KEY,
-  chat_id VARCHAR(128) NOT NULL UNIQUE,
+  chat_id VARCHAR(128) NOT NULL,
   contact_id INT,
+  workspace_id INT DEFAULT 1,
   status ENUM('New','Seen','Closed') DEFAULT 'New',
   unread_count INT DEFAULT 0,
   last_message TEXT,
@@ -30,7 +33,8 @@ CREATE TABLE IF NOT EXISTS conversations (
   last_at DATETIME,
   automation_last_run_at DATETIME,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE SET NULL
+  FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE SET NULL,
+  UNIQUE KEY uk_conversations_chat_workspace (chat_id, workspace_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS messages (

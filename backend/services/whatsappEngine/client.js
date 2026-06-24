@@ -230,6 +230,62 @@ class ClientWrapper {
     });
   }
 
+  async findOrCreateContact(phone, name) {
+    try {
+      this.logger.info('contact.find.start', { phone, name, workspaceId: this.workspaceId });
+      const existingContacts = await db.query('SELECT * FROM contacts WHERE phone = ? AND workspace_id = ? LIMIT 1', [phone, this.workspaceId]);
+      this.logger.info('contact.find.result', { phone, count: existingContacts.length, workspaceId: this.workspaceId });
+      if (existingContacts.length) {
+        const contactId = existingContacts[0].id;
+        const updateRes = await db.query('UPDATE contacts SET name = ?, last_interaction = NOW() WHERE id = ? AND workspace_id = ?', [name, contactId, this.workspaceId]);
+        this.logger.info('contact.update.result', { contactId, updateRes, workspaceId: this.workspaceId });
+        return contactId;
+      }
+
+      try {
+        const result = await db.query('INSERT INTO contacts (name, phone, workspace_id, last_interaction) VALUES (?, ?, ?, NOW())', [name, phone, this.workspaceId]);
+        this.logger.info('contact.insert.result', { contactId: result.insertId, workspaceId: this.workspaceId });
+        return result.insertId;
+      } catch (insertErr) {
+        if (insertErr.code === 'ER_DUP_ENTRY') {
+          this.logger.warn('contact.insert.duplicate_retry', { phone, workspaceId: this.workspaceId, error: insertErr.message });
+          const rows = await db.query('SELECT * FROM contacts WHERE phone = ? AND workspace_id = ? LIMIT 1', [phone, this.workspaceId]);
+          if (rows.length) return rows[0].id;
+        }
+        throw insertErr;
+      }
+    } catch (err) {
+      this.logger.error('contact.findOrCreate.failed', { phone, workspaceId: this.workspaceId, error: err.message });
+      await logService.create('error', 'contact_find_or_create_failed', `${phone}: ${err.message}`, this.workspaceId).catch(() => {});
+      return null;
+    }
+  }
+
+  async findOrCreateConversation(chatId, contactId, body) {
+    const existingConv = await db.query('SELECT * FROM conversations WHERE chat_id = ? AND workspace_id = ? LIMIT 1', [chatId, this.workspaceId]);
+    this.logger.info('conversation.find.result', { chatId, count: existingConv.length, workspaceId: this.workspaceId });
+    if (existingConv.length) {
+      const conversation = existingConv[0];
+      const updateRes = await db.query('UPDATE conversations SET unread_count = unread_count + 1, status = ?, last_message = ?, last_at = NOW() WHERE id = ? AND workspace_id = ?', ['New', body, conversation.id, this.workspaceId]);
+      this.logger.info('conversation.update.result', { conversationId: conversation.id, updateRes, workspaceId: this.workspaceId });
+      return { conversation, isNew: false };
+    }
+
+    try {
+      const result = await db.query('INSERT INTO conversations (chat_id, contact_id, workspace_id, status, unread_count, last_message, last_at) VALUES (?, ?, ?, ?, ?, ?, NOW())', [chatId, contactId, this.workspaceId, 'New', 1, body]);
+      this.logger.info('conversation.insert.result', { result, workspaceId: this.workspaceId });
+      const rows = await db.query('SELECT * FROM conversations WHERE id = ? AND workspace_id = ?', [result.insertId, this.workspaceId]);
+      return { conversation: rows[0], isNew: true };
+    } catch (insertErr) {
+      if (insertErr.code === 'ER_DUP_ENTRY') {
+        this.logger.warn('conversation.insert.duplicate_retry', { chatId, workspaceId: this.workspaceId, error: insertErr.message });
+        const rows = await db.query('SELECT * FROM conversations WHERE chat_id = ? AND workspace_id = ? LIMIT 1', [chatId, this.workspaceId]);
+        if (rows.length) return { conversation: rows[0], isNew: false };
+      }
+      throw insertErr;
+    }
+  }
+
   detachEvents() {
     if (!this.client || !this.eventHandlers) return;
     Object.entries(this.eventHandlers).forEach(([event, handler]) => {
@@ -305,42 +361,9 @@ class ClientWrapper {
         body = `ملف ${type}`;
       }
 
-      const existingContacts = await db.query('SELECT * FROM contacts WHERE phone = ? AND workspace_id = ?', [phone, this.workspaceId]);
-      this.logger.info('db.query', { sql: 'SELECT * FROM contacts WHERE phone = ? AND workspace_id = ?', params: [phone, this.workspaceId], workspaceId: this.workspaceId });
-      this.logger.info('db.result.contacts', { count: existingContacts.length, workspaceId: this.workspaceId });
-      let contactId;
-      if (existingContacts.length) {
-        contactId = existingContacts[0].id;
-        this.logger.info('db.query', { sql: 'UPDATE contacts SET name = ?, last_interaction = NOW() WHERE id = ?', params: [name, contactId], workspaceId: this.workspaceId });
-        const updateRes = await db.query('UPDATE contacts SET name = ?, last_interaction = NOW() WHERE id = ?', [name, contactId]);
-        this.logger.info('db.result.updateContact', { updateRes, contactId, workspaceId: this.workspaceId });
-      } else {
-        this.logger.info('db.query', { sql: 'INSERT INTO contacts (name, phone, workspace_id, last_interaction) VALUES (?, ?, ?, NOW())', params: [name, phone, this.workspaceId], workspaceId: this.workspaceId });
-        const c = await db.query('INSERT INTO contacts (name, phone, workspace_id, last_interaction) VALUES (?, ?, ?, NOW())', [name, phone, this.workspaceId]);
-        this.logger.info('db.result.insertContact', { result: c, workspaceId: this.workspaceId });
-        contactId = c.insertId;
-      }
-
-      this.logger.info('db.query', { sql: 'SELECT * FROM conversations WHERE chat_id = ? AND workspace_id = ?', params: [chatId, this.workspaceId], workspaceId: this.workspaceId });
-      const existingConv = await db.query('SELECT * FROM conversations WHERE chat_id = ? AND workspace_id = ?', [chatId, this.workspaceId]);
-      this.logger.info('db.result.conversations', { count: existingConv.length, workspaceId: this.workspaceId });
-      let conversation;
-      let isNew = false;
-      if (existingConv.length) {
-        conversation = existingConv[0];
-        this.logger.info('db.query', { sql: 'UPDATE conversations SET unread_count = unread_count + 1, status = ?, last_message = ?, last_at = NOW() WHERE id = ?', params: ['New', body, conversation.id], workspaceId: this.workspaceId });
-        const u = await db.query('UPDATE conversations SET unread_count = unread_count + 1, status = ?, last_message = ?, last_at = NOW() WHERE id = ?', ['New', body, conversation.id]);
-        this.logger.info('db.result.updateConversation', { result: u, conversationId: conversation.id, workspaceId: this.workspaceId });
-      } else {
-        this.logger.info('db.query', { sql: 'INSERT INTO conversations (chat_id, contact_id, workspace_id, status, unread_count, last_message, last_at) VALUES (?, ?, ?, ?, ?, ?, NOW())', params: [chatId, contactId, this.workspaceId, 'New', 1, body], workspaceId: this.workspaceId });
-        const result = await db.query('INSERT INTO conversations (chat_id, contact_id, workspace_id, status, unread_count, last_message, last_at) VALUES (?, ?, ?, ?, ?, ?, NOW())', [chatId, contactId, this.workspaceId, 'New', 1, body]);
-        this.logger.info('db.result.insertConversation', { result, workspaceId: this.workspaceId });
-        this.logger.info('db.query', { sql: 'SELECT * FROM conversations WHERE id = ?', params: [result.insertId], workspaceId: this.workspaceId });
-        const rows = await db.query('SELECT * FROM conversations WHERE id = ?', [result.insertId]);
-        this.logger.info('db.result.selectConversationById', { rows, workspaceId: this.workspaceId });
-        conversation = rows[0];
-        isNew = true;
-      }
+      const contactId = await this.findOrCreateContact(phone, name);
+      const { conversation, isNew } = await this.findOrCreateConversation(chatId, contactId, body);
+      if (!conversation) throw new Error(`Conversation not available for ${chatId}`);
 
       this.logger.info('db.query', { sql: 'INSERT INTO messages (conversation_id, sender, body, type, media_path, direction, workspace_id, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())', params: [conversation.id, 'client', body, type, mediaPath, 'in', this.workspaceId], workspaceId: this.workspaceId });
       const msgRes = await db.query('INSERT INTO messages (conversation_id, sender, body, type, media_path, direction, workspace_id, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())', [conversation.id, 'client', body, type, mediaPath, 'in', this.workspaceId]);

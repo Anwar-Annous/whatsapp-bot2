@@ -209,33 +209,67 @@ function registerSocket(socket) {
   socket.on('disconnect', () => sockets.delete(socket));
 }
 
-async function saveIncomingConversation(chatId, contactId, phone, contactName, lastMessage) {
-  const existing = await db.query('SELECT * FROM conversations WHERE chat_id = ?', [chatId]);
+async function saveIncomingConversation(chatId, contactId, phone, contactName, lastMessage, workspaceId = 1) {
+  const existing = await db.query('SELECT * FROM conversations WHERE chat_id = ? AND workspace_id = ?', [chatId, workspaceId]);
   if (existing.length) {
     const conv = existing[0];
-    await db.query('UPDATE conversations SET unread_count = unread_count + 1, status = ?, last_message = ?, last_at = NOW() WHERE id = ?', ['New', lastMessage, conv.id]);
+    await db.query('UPDATE conversations SET unread_count = unread_count + 1, status = ?, last_message = ?, last_at = NOW() WHERE id = ? AND workspace_id = ?', ['New', lastMessage, conv.id, workspaceId]);
     return { conversation: conv, isNew: false };
   }
-  const result = await db.query('INSERT INTO conversations (chat_id, contact_id, status, unread_count, last_message, last_at) VALUES (?, ?, ?, ?, ?, NOW())', [
-    chatId,
-    contactId,
-    'New',
-    1,
-    lastMessage
-  ]);
-  const rows = await db.query('SELECT * FROM conversations WHERE id = ?', [result.insertId]);
-  return { conversation: rows[0], isNew: true };
+  try {
+    const result = await db.query('INSERT INTO conversations (chat_id, contact_id, workspace_id, status, unread_count, last_message, last_at) VALUES (?, ?, ?, ?, ?, ?, NOW())', [
+      chatId,
+      contactId,
+      workspaceId,
+      'New',
+      1,
+      lastMessage
+    ]);
+    const rows = await db.query('SELECT * FROM conversations WHERE id = ? AND workspace_id = ?', [result.insertId, workspaceId]);
+    return { conversation: rows[0], isNew: true };
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      const rows = await db.query('SELECT * FROM conversations WHERE chat_id = ? AND workspace_id = ?', [chatId, workspaceId]);
+      if (rows.length) return { conversation: rows[0], isNew: false };
+    }
+    throw err;
+  }
 }
 
-async function saveIncomingMessage(conversationId, body, type, mediaPath) {
-  await db.query('INSERT INTO messages (conversation_id, sender, body, type, media_path, direction, timestamp) VALUES (?, ?, ?, ?, ?, ?, NOW())', [
+async function saveIncomingMessage(conversationId, body, type, mediaPath, workspaceId = 1) {
+  await db.query('INSERT INTO messages (conversation_id, sender, body, type, media_path, direction, workspace_id, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())', [
     conversationId,
     'client',
     body,
     type,
     mediaPath,
-    'in'
+    'in',
+    workspaceId
   ]);
+}
+
+async function findOrCreateIncomingContact(phone, name, workspaceId = 1) {
+  try {
+    const existingContacts = await db.query('SELECT * FROM contacts WHERE phone = ? AND workspace_id = ? LIMIT 1', [phone, workspaceId]);
+    if (existingContacts.length) {
+      const contactId = existingContacts[0].id;
+      await db.query('UPDATE contacts SET name = ?, last_interaction = NOW() WHERE id = ? AND workspace_id = ?', [name, contactId, workspaceId]);
+      return contactId;
+    }
+    try {
+      const c = await db.query('INSERT INTO contacts (name, phone, workspace_id, last_interaction) VALUES (?, ?, ?, NOW())', [name, phone, workspaceId]);
+      return c.insertId;
+    } catch (err) {
+      if (err.code === 'ER_DUP_ENTRY') {
+        const rows = await db.query('SELECT * FROM contacts WHERE phone = ? AND workspace_id = ? LIMIT 1', [phone, workspaceId]);
+        if (rows.length) return rows[0].id;
+      }
+      throw err;
+    }
+  } catch (err) {
+    await logService.create('error', 'contact_find_or_create_failed', `${phone}: ${err.message}`, workspaceId).catch(() => {});
+    return null;
+  }
 }
 
 function getMediaExtension(mime) {
@@ -257,6 +291,7 @@ function normalizeMessageType(type) {
 }
 
 async function handleIncomingMessage(message) {
+  const workspaceId = 1;
   const contact = await message.getContact();
   const phone = contact.number || message.from.replace('@c.us', '');
   const name = contact.pushname || contact.name || phone;
@@ -282,24 +317,16 @@ async function handleIncomingMessage(message) {
     body = `ملف ${type}`;
   }
 
-  const existingContacts = await db.query('SELECT * FROM contacts WHERE phone = ?', [phone]);
-  let contactId;
-  if (existingContacts.length) {
-    contactId = existingContacts[0].id;
-    await db.query('UPDATE contacts SET name = ?, last_interaction = NOW() WHERE id = ?', [name, contactId]);
-  } else {
-    const c = await db.query('INSERT INTO contacts (name, phone, last_interaction) VALUES (?, ?, NOW())', [name, phone]);
-    contactId = c.insertId;
-  }
-
-  const { conversation, isNew } = await saveIncomingConversation(chatId, contactId, phone, name, body);
-  await saveIncomingMessage(conversation.id, body, type, mediaPath);
+  const contactId = await findOrCreateIncomingContact(phone, name, workspaceId);
+  const { conversation, isNew } = await saveIncomingConversation(chatId, contactId, phone, name, body, workspaceId);
+  await saveIncomingMessage(conversation.id, body, type, mediaPath, workspaceId);
   emit('new_message', { chatId, body, type, conversationId: conversation.id });
   await logService.create('info', 'incoming_message', `message from ${phone}`);
 
   const autoSent = await automationService.runAutomation(sendText, sendMediaById, chatId, conversation.id, {
     isNew,
-    conversation
+    conversation,
+    workspaceId
   });
   if (autoSent) {
     emit('automation_triggered', { chatId, conversationId: conversation.id });
